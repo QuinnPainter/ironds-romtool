@@ -1,6 +1,7 @@
 use getopts::Options;
 use std::env;
-use std::io::{Seek, Write};
+use std::io::{Seek, Write, SeekFrom};
+use std::path::Path;
 use std::fs::File;
 use elf;
 
@@ -100,7 +101,7 @@ fn load_elf(elf_file_name: &str, output_file: &mut File) {
     // going to assume the start of the ARM7 data should be 32-bit aligned
     file_align_32(output_file);
 
-    let arm9_path = std::path::PathBuf::from(elf_file_name);
+    let arm9_path = Path::new(elf_file_name);
     let arm9_file = std::fs::read(arm9_path).expect("Unable to open ARM9 executable");
     let arm9_elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(arm9_file.as_slice()).expect("no parsey");
     let arm9_segments = arm9_elf.segments().unwrap();
@@ -114,14 +115,19 @@ fn load_elf(elf_file_name: &str, output_file: &mut File) {
         // Skip empty segments
         if s.p_filesz == 0 || s.p_memsz == 0 { continue; }
 
-        println!("{:?}", s);
-
+        // if there's a gap in the paddrs, then there must be some bss section
+        // in the middle, or something like that. it's probably a mistake,
+        // but let's just pad some space for it.
         if s.p_paddr != last_segment_end {
-            println!("gap size: {}", s.p_paddr - last_segment_end);
+            if s.p_paddr < last_segment_end {
+                println!("ERROR: segment ending at p addr {:#010x} \
+                    overlaps with segment starting at {:#010x}",last_segment_end, s.p_paddr);
+                std::process::exit(1);
+            }
+            output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)).unwrap();
         }
-        println!("{:#02x}", s.p_memsz);
-        last_segment_end = s.p_paddr + s.p_memsz;
-        output_file.write(&[5]).unwrap();
+        last_segment_end = s.p_paddr + s.p_filesz;
+        output_file.write(arm9_elf.segment_data(&s).unwrap()).unwrap();
     }
 }
 
@@ -132,7 +138,7 @@ fn file_align_32(file: &mut File) {
     // check if it's already aligned
     if cur_pos & 0b11 == 0 { return; }
 
-    file.seek(std::io::SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)).unwrap();
+    file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)).unwrap();
 }
 
 fn main() {
@@ -158,21 +164,18 @@ fn main() {
         arm7_file_name: matches.opt_str("7").unwrap(),
     };
 
-    let output_file_path = std::path::Path::new(&args.output_file_name);
+    let output_file_path = Path::new(&args.output_file_name);
     let mut output_file = match File::create(output_file_path) {
         Err(why) => wrong_input(&format!("Unable to create file: {} - {}", output_file_path.display(), why)),
         Ok(file) => file
     };
 
     // ARM9 binary starts at 0x4000
-    output_file.seek(std::io::SeekFrom::Start(0x4000)).unwrap();
-
-    println!("Arm9");
+    output_file.seek(SeekFrom::Start(0x4000)).unwrap();
     load_elf(&args.arm9_file_name, &mut output_file);
-    println!("Arm7");
     // Gbatek says ARM7 binary has to start at a minimum offset of 0x8000
     if output_file.stream_position().unwrap() < 0x8000 {
-        output_file.seek(std::io::SeekFrom::Start(0x8000)).unwrap();
+        output_file.seek(SeekFrom::Start(0x8000)).unwrap();
     }
     load_elf(&args.arm7_file_name, &mut output_file);
 }
@@ -185,7 +188,7 @@ mod tests {
     #[test]
     fn file_align_32_already_aligned() {
         let mut tmpfile = tempfile::tempfile().unwrap();
-        tmpfile.seek(std::io::SeekFrom::Start(4)).unwrap();
+        tmpfile.seek(SeekFrom::Start(4)).unwrap();
         file_align_32(&mut tmpfile);
         assert_eq!(tmpfile.stream_position().unwrap(), 4);
     }
@@ -194,7 +197,7 @@ mod tests {
     fn file_align_32_1_to_3() {
         let mut tmpfile = tempfile::tempfile().unwrap();
         for i in 1..4 {
-            tmpfile.seek(std::io::SeekFrom::Start(i)).unwrap();
+            tmpfile.seek(SeekFrom::Start(i)).unwrap();
             file_align_32(&mut tmpfile);
             assert_eq!(tmpfile.stream_position().unwrap(), 4);
         }
