@@ -285,7 +285,6 @@ fn main() {
     };
 
     let output_file_path = Path::new(&args.output_file_name);
-    //let mut output_file = match File::create(output_file_path) {
     let mut output_file = match File::options().create(true).read(true).write(true).open(output_file_path) {
         Err(why) => wrong_input(&format!("Unable to create file: {} - {}", output_file_path.display(), why)),
         Ok(file) => file
@@ -312,10 +311,16 @@ fn main() {
     header.arm7_ram_addr = arm7_header.ram_addr;
     header.arm7_size = arm7_header.size;
 
+    // Get secure area checksum
     output_file.seek(SeekFrom::Start(header.arm9_rom_offset.into())).unwrap();
     let mut secure_buf = vec![0; (0x8000 - header.arm9_rom_offset) as usize];
     output_file.read_exact(&mut secure_buf).unwrap();
     header.secure_area_checksum = calc_crc_16(&secure_buf);
+
+    // Get header checksum
+    header.header_checksum = calc_crc_16(unsafe {
+        std::slice::from_raw_parts(&header as *const Header as *const u8, 0x15E)
+    });
 
     output_file.seek(SeekFrom::Start(0)).unwrap();
     output_file.write(unsafe {
