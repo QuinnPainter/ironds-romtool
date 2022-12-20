@@ -1,8 +1,9 @@
 use getopts::Options;
 use std::env;
-use std::io::{Seek, Write, SeekFrom};
+use std::io::{Seek, Read, Write, SeekFrom};
 use std::path::Path;
 use std::fs::File;
+use std::vec::Vec;
 use elf;
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
@@ -27,13 +28,48 @@ const ROM_CTRL_1_DEFAULT: u32 = 0x00586000;
 const ROM_CTRL_2_DEFAULT: u32 = 0x001808F8;
 const ROM_CTRL_3_DEFAULT: u16 = 0x051E;
 
+const CRC_16_TABLE: [u16; 256] = [
+    0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
+    0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
+    0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+    0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,
+    0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,
+    0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+    0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,
+    0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,
+    0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+    0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,
+    0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,
+    0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+    0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,
+    0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,
+    0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+    0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,
+    0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,
+    0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+    0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,
+    0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,
+    0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+    0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,
+    0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,
+    0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+    0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,
+    0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,
+    0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+    0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,
+    0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,
+    0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+    0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
+    0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040 
+];
+
 // # https://problemkaputt.de/gbatek.htm#dscartridgeheader
 #[repr(C, packed)]
 struct Header {
     game_title: [u8; 12],       // (Uppercase ASCII, padded with 00h)
     game_code: [u8; 4],         // (Uppercase ASCII, NTR-<code>)        (0=homebrew)
     maker_code: [u8; 2],        // (Uppercase ASCII, eg. "01"=Nintendo) (0=homebrew)
-    unit_code: [u8; 2],         // (00h=NDS, 02h=NDS+DSi, 03h=DSi) (bit1=DSi)
+    unit_code: u8,              // (00h=NDS, 02h=NDS+DSi, 03h=DSi) (bit1=DSi)
     encryption_seed_select: u8, // (00..07h, usually 00h)
     cart_capacity: u8,          // (Chipsize = 128KB SHL nn) (eg. 7 = 16MB)
     reserved1: [u8; 7],         // 0 filled
@@ -66,6 +102,7 @@ struct Header {
     arm7_auto_ld_list_hook: u32,// "
     secure_area_disable: u64,   // (by encrypted "NmMdOnly") (usually zero)
     total_rom_size: u32,        // (remaining/unused bytes usually FFh-padded)
+    rom_header_size: u32,       // 4000h
     reserved3: u32,             // Unknown, some rom_offset, or zero? (DSi: slightly different)
     reserved4: u64,             // (zero filled; except, [88h..93h] used on DSi)
     nand_rom_end: u16,          // \ in 20000h-byte units (DSi: 80000h-byte)
@@ -80,6 +117,69 @@ struct Header {
     dbg_ram_addr: u32,          // (0=none) (2400000h..27BFE00h) SIO and 8MB
     // Rest of header is 0 filled
     // (up to 0x200 sortof? but seems like it must be empty until 0x4000)
+}
+
+impl Default for Header {
+    fn default() -> Self {
+        Header {
+            game_title: *b"HOMEBREW\0\0\0\0", // default from devkitarm
+            game_code: *b"####",              // default from devkitarm
+            maker_code: [0, 0],
+            unit_code: 0,                     // NDS
+            encryption_seed_select: 0,
+            cart_capacity: 0,
+            reserved1: [0; 7],
+            reserved2: 0,
+            region: 0,                        // "Normal" region (non China or Korea)
+            rom_version: 0,
+            autostart: 0,
+            arm9_rom_offset: 0,
+            arm9_entry_addr: 0,
+            arm9_ram_addr: 0,
+            arm9_size: 0,
+            arm7_rom_offset: 0,
+            arm7_entry_addr: 0,
+            arm7_ram_addr: 0,
+            arm7_size: 0,
+            fnt_offset: 0,
+            fnt_size: 0,
+            fat_offset: 0,
+            fat_size: 0,
+            file_arm9_overlay_ofs: 0,
+            file_arm9_overlay_size: 0,
+            file_arm7_overlay_ofs: 0,
+            file_arm7_overlay_size: 0,
+            rom_ctrl1: ROM_CTRL_1_DEFAULT,
+            rom_ctrl2: ROM_CTRL_2_DEFAULT,
+            icon_title_offset: 0,
+            secure_area_checksum: 0,
+            rom_ctrl3: ROM_CTRL_3_DEFAULT,
+            arm9_auto_ld_list_hook: 0,
+            arm7_auto_ld_list_hook: 0,
+            secure_area_disable: 0,
+            total_rom_size: 0,
+            rom_header_size: 0x4000,
+            reserved3: 0,
+            reserved4: 0,
+            nand_rom_end: 0,
+            nand_rw_start: 0,
+            reserved5: [0; 24],
+            reserved6: [0; 16],
+            nin_logo: NIN_LOGO_DEFAULT,
+            nin_logo_checksum: NIN_LOGO_CRC_DEFAULT,
+            header_checksum: 0,
+            dbg_rom_offset: 0,
+            dbg_size: 0,
+            dbg_ram_addr: 0
+        }
+    }
+}
+
+struct CPUHeaderData {
+    rom_offset: u32,
+    entry_addr: u32,
+    ram_addr: u32,
+    size: u32
 }
 
 struct Args {
@@ -97,18 +197,21 @@ fn print_help(opts: &Options) {
     print!("{}", opts.usage(&format!("IronDS ROM Tool version {}", VERSION.unwrap_or("unknown"))));
 }
 
-fn load_elf(elf_file_name: &str, output_file: &mut File) {
-    // going to assume the start of the ARM7 data should be 32-bit aligned
+fn load_elf(elf_file_name: &str, output_file: &mut File) -> CPUHeaderData {
+    // going to assume the start of the data should be 32-bit aligned
     file_align_32(output_file);
+    let hdr_offset = output_file.stream_position().unwrap();
 
-    let arm9_path = Path::new(elf_file_name);
-    let arm9_file = std::fs::read(arm9_path).expect("Unable to open ARM9 executable");
-    let arm9_elf = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(arm9_file.as_slice()).expect("no parsey");
-    let arm9_segments = arm9_elf.segments().unwrap();
+    let in_file = std::fs::read(Path::new(elf_file_name)).expect("Unable to open ARM9 executable");
+    let elf_data = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(in_file.as_slice()).expect("no parsey");
+    let elf_segments = elf_data.segments().unwrap();
 
-    let mut last_segment_end: u64 = arm9_segments.get(0).unwrap().p_paddr;
+    assert_eq!(elf_data.ehdr.e_machine, elf::abi::EM_ARM);
 
-    for s in arm9_segments {
+    let first_segment_addr =  elf_segments.get(0).unwrap().p_paddr;
+    let mut last_segment_end = first_segment_addr;
+
+    for s in elf_segments {
         // Skip non-loaded segments (that contain debug data or whatever)
         if s.p_type != elf::abi::PT_LOAD { continue; }
 
@@ -127,7 +230,13 @@ fn load_elf(elf_file_name: &str, output_file: &mut File) {
             output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)).unwrap();
         }
         last_segment_end = s.p_paddr + s.p_filesz;
-        output_file.write(arm9_elf.segment_data(&s).unwrap()).unwrap();
+        output_file.write(elf_data.segment_data(&s).unwrap()).unwrap();
+    }
+    CPUHeaderData { 
+        rom_offset: hdr_offset as u32,
+        entry_addr: elf_data.ehdr.e_entry as u32,
+        ram_addr: first_segment_addr as u32,
+        size: (output_file.stream_position().unwrap() - hdr_offset) as u32
     }
 }
 
@@ -139,6 +248,17 @@ fn file_align_32(file: &mut File) {
     if cur_pos & 0b11 == 0 { return; }
 
     file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)).unwrap();
+}
+
+// Calculate the CRC-16 of a block of data, using the same algorithm as the DS BIOS.
+// Uses the "MODBUS" type of CRC.
+// https://problemkaputt.de/gbatek.htm#biosmiscfunctions
+fn calc_crc_16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for d in data {
+        crc = (crc >> 8) ^ CRC_16_TABLE[(crc as u8 ^ d) as usize];
+    }
+    crc
 }
 
 fn main() {
@@ -165,19 +285,42 @@ fn main() {
     };
 
     let output_file_path = Path::new(&args.output_file_name);
-    let mut output_file = match File::create(output_file_path) {
+    //let mut output_file = match File::create(output_file_path) {
+    let mut output_file = match File::options().create(true).read(true).write(true).open(output_file_path) {
         Err(why) => wrong_input(&format!("Unable to create file: {} - {}", output_file_path.display(), why)),
         Ok(file) => file
     };
 
+    let mut header = Header::default();
+    header.header_checksum = 0;
+
     // ARM9 binary starts at 0x4000
     output_file.seek(SeekFrom::Start(0x4000)).unwrap();
-    load_elf(&args.arm9_file_name, &mut output_file);
+    let arm9_header = load_elf(&args.arm9_file_name, &mut output_file);
     // Gbatek says ARM7 binary has to start at a minimum offset of 0x8000
     if output_file.stream_position().unwrap() < 0x8000 {
         output_file.seek(SeekFrom::Start(0x8000)).unwrap();
     }
-    load_elf(&args.arm7_file_name, &mut output_file);
+    let arm7_header = load_elf(&args.arm7_file_name, &mut output_file);
+
+    header.arm9_rom_offset = arm9_header.rom_offset;
+    header.arm9_entry_addr = arm9_header.entry_addr;
+    header.arm9_ram_addr = arm9_header.ram_addr;
+    header.arm9_size = arm9_header.size;
+    header.arm7_rom_offset = arm7_header.rom_offset;
+    header.arm7_entry_addr = arm7_header.entry_addr;
+    header.arm7_ram_addr = arm7_header.ram_addr;
+    header.arm7_size = arm7_header.size;
+
+    output_file.seek(SeekFrom::Start(header.arm9_rom_offset.into())).unwrap();
+    let mut secure_buf = vec![0; (0x8000 - header.arm9_rom_offset) as usize];
+    output_file.read_exact(&mut secure_buf).unwrap();
+    header.secure_area_checksum = calc_crc_16(&secure_buf);
+
+    output_file.seek(SeekFrom::Start(0)).unwrap();
+    output_file.write(unsafe {
+        std::slice::from_raw_parts(&header as *const Header as *const u8, std::mem::size_of::<Header>())
+    }).unwrap();
 }
 
 #[cfg(test)]
@@ -201,5 +344,13 @@ mod tests {
             file_align_32(&mut tmpfile);
             assert_eq!(tmpfile.stream_position().unwrap(), 4);
         }
+    }
+
+    #[test]
+    fn crc_16_nin_logo() {
+        let nin_logo = NIN_LOGO_DEFAULT;
+        let crc = calc_crc_16(&nin_logo);
+        assert_eq!(crc, NIN_LOGO_CRC_DEFAULT,
+            "CRC-16 calculated as {:#06X}, should be {:#06X}", crc, NIN_LOGO_CRC_DEFAULT);
     }
 }
