@@ -322,6 +322,10 @@ fn main() {
         std::slice::from_raw_parts(&header as *const Header as *const u8, 0x15E)
     });
 
+    // Get total ROM size
+    output_file.seek(SeekFrom::End(0)).unwrap();
+    header.total_rom_size = output_file.stream_position().unwrap() as u32;
+
     output_file.seek(SeekFrom::Start(0)).unwrap();
     output_file.write(unsafe {
         std::slice::from_raw_parts(&header as *const Header as *const u8, std::mem::size_of::<Header>())
