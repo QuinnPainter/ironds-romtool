@@ -16,9 +16,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "elf"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6de42b0529467fc9a2692fd91585c84dd255fb15b0df0f80299724a9456986c6"
+checksum = "2ace2c81c1832d02208b8317b90b2de5b3b4f55024b86d3f2ae800353e348fd7"
 
 [[package]]
 name = "fastrand"
@@ -58,9 +58,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.138"
+version = "0.2.139"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "db6d7e329c562c5dfab7a46a2afabc8b987ab9a4834c9d1ca04dc54c1546cef8"
+checksum = "201de327520df007757c1f0adce6e827fe8562fbc28bfd9c15571c66ca1f5f79"
 
 [[package]]
 name = "redox_syscall"
