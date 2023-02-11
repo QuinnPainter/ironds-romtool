@@ -4,7 +4,6 @@ use std::io::{Seek, Read, Write, SeekFrom};
 use std::path::Path;
 use std::fs::File;
 use std::vec::Vec;
-use elf;
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
@@ -189,7 +188,7 @@ struct Args {
 }
 
 fn wrong_input(msg: &str) -> ! {
-    println!("{}", msg);
+    println!("{msg}");
     std::process::exit(1);
 }
 
@@ -230,7 +229,7 @@ fn load_elf(elf_file_name: &str, output_file: &mut File) -> CPUHeaderData {
             output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)).unwrap();
         }
         last_segment_end = s.p_paddr + s.p_filesz;
-        output_file.write(elf_data.segment_data(&s).unwrap()).unwrap();
+        output_file.write_all(elf_data.segment_data(&s).unwrap()).unwrap();
     }
     CPUHeaderData { 
         rom_offset: hdr_offset as u32,
@@ -326,8 +325,8 @@ fn main() {
     output_file.seek(SeekFrom::End(0)).unwrap();
     header.total_rom_size = output_file.stream_position().unwrap() as u32;
 
-    output_file.seek(SeekFrom::Start(0)).unwrap();
-    output_file.write(unsafe {
+    output_file.rewind().unwrap(); // Seek to beginning
+    output_file.write_all(unsafe {
         std::slice::from_raw_parts(&header as *const Header as *const u8, std::mem::size_of::<Header>())
     }).unwrap();
 }
