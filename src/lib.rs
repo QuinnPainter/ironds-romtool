@@ -186,18 +186,18 @@ macro_rules! unwrap_or_return_err {
     };
 }
 
-macro_rules! unwrap_file_seek {
+macro_rules! unwrap_file_access {
     ($val:expr) => {
-        unwrap_or_return_err!($val, "Unable to seek file: {}")
+        unwrap_or_return_err!($val, "Unable to access file: {}")
     }
 }
 
 fn load_elf(elf_path: &Path, output_file: &mut File) -> Result<CPUHeaderData, String> {
     // going to assume the start of the data should be 32-bit aligned
     file_align_32(output_file)?;
-    let hdr_offset = unwrap_or_return_err!(output_file.stream_position(), "Unable to access executable: {}");
+    let hdr_offset = unwrap_file_access!(output_file.stream_position());
 
-    let in_file = unwrap_or_return_err!(std::fs::read(elf_path), "Unable to open executable: {}");
+    let in_file = unwrap_file_access!(std::fs::read(elf_path));
     let elf_data = unwrap_or_return_err!(elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(in_file.as_slice()),
         "Unable to parse executable as ELF: {}");
     let elf_segments = match elf_data.segments() {
@@ -227,13 +227,13 @@ fn load_elf(elf_path: &Path, output_file: &mut File) -> Result<CPUHeaderData, St
                 return Err(format!("ERROR: segment ending at p addr {:#010x} \
                     overlaps with segment starting at {:#010x}",last_segment_end, s.p_paddr));
             }
-            unwrap_file_seek!(output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)));
+            unwrap_file_access!(output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)));
         }
         last_segment_end = s.p_paddr + s.p_filesz;
         let segment_data = unwrap_or_return_err!(elf_data.segment_data(&s), "Unable to parse ELF segment: {}");
         unwrap_or_return_err!(output_file.write_all(segment_data), "Unable to write output file: {}");
     }
-    let size: u64 = unwrap_file_seek!(output_file.stream_position()) - hdr_offset;
+    let size: u64 = unwrap_file_access!(output_file.stream_position()) - hdr_offset;
     Ok(CPUHeaderData {
         rom_offset: hdr_offset as u32,
         entry_addr: elf_data.ehdr.e_entry as u32,
@@ -244,11 +244,11 @@ fn load_elf(elf_path: &Path, output_file: &mut File) -> Result<CPUHeaderData, St
 
 // Seek a file forward so that it is 32-bit aligned, filling in with 0s where necessary.
 fn file_align_32(file: &mut File) -> Result<(), String> {
-    let cur_pos = unwrap_file_seek!(file.stream_position());
+    let cur_pos = unwrap_file_access!(file.stream_position());
 
     // check if it's already aligned
     if cur_pos & 0b11 != 0 {
-        unwrap_file_seek!(file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)));
+        unwrap_file_access!(file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)));
     }
     Ok(())
 }
@@ -264,22 +264,19 @@ fn calc_crc_16(data: &[u8]) -> u16 {
     crc
 }
 
-// TODO: turn all these unwraps and assertions and such into "return Err" states
 pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Result<(), String> {
-    let mut output_file = match File::options().create(true).read(true).write(true).open(output_path) {
-        Err(why) => return Err(format!("Unable to create file: {} - {}", output_path.display(), why)),
-        Ok(file) => file
-    };
+    let mut output_file = unwrap_or_return_err!(File::options().create(true).read(true).write(true).open(output_path),
+        "Unable to create output file: {}");
 
     let mut header = Header::default();
     header.header_checksum = 0;
 
     // ARM9 binary starts at 0x4000
-    output_file.seek(SeekFrom::Start(0x4000)).unwrap();
+    unwrap_file_access!(output_file.seek(SeekFrom::Start(0x4000)));
     let arm9_header = load_elf(arm9_path, &mut output_file)?;
     // Gbatek says ARM7 binary has to start at a minimum offset of 0x8000
-    if output_file.stream_position().unwrap() < 0x8000 {
-        output_file.seek(SeekFrom::Start(0x8000)).unwrap();
+    if unwrap_file_access!(output_file.stream_position()) < 0x8000 {
+        unwrap_file_access!(output_file.seek(SeekFrom::Start(0x8000)));
     }
     let arm7_header = load_elf(arm7_path, &mut output_file)?;
 
@@ -293,9 +290,9 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
     header.arm7_size = arm7_header.size;
 
     // Get secure area checksum
-    output_file.seek(SeekFrom::Start(header.arm9_rom_offset.into())).unwrap();
+    unwrap_file_access!(output_file.seek(SeekFrom::Start(header.arm9_rom_offset.into())));
     let mut secure_buf = vec![0; (0x8000 - header.arm9_rom_offset) as usize];
-    output_file.read_exact(&mut secure_buf).unwrap();
+    unwrap_file_access!(output_file.read_exact(&mut secure_buf));
     header.secure_area_checksum = calc_crc_16(&secure_buf);
 
     // Get header checksum
@@ -304,13 +301,13 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
     });
 
     // Get total ROM size
-    output_file.seek(SeekFrom::End(0)).unwrap();
-    header.total_rom_size = output_file.stream_position().unwrap() as u32;
+    unwrap_file_access!(output_file.seek(SeekFrom::End(0)));
+    header.total_rom_size = unwrap_file_access!(output_file.stream_position()) as u32;
 
-    output_file.rewind().unwrap(); // Seek to beginning
-    output_file.write_all(unsafe {
+    unwrap_file_access!(output_file.rewind()); // Seek to beginning
+    unwrap_or_return_err!(output_file.write_all(unsafe {
         std::slice::from_raw_parts(std::ptr::addr_of!(header).cast::<u8>(), std::mem::size_of::<Header>())
-    }).unwrap();
+    }), "Unable to write output file: {}");
     Ok(())
 }
 
