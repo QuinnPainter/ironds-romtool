@@ -1,3 +1,4 @@
+//#![warn(clippy::pedantic)]
 use std::io::{Seek, Read, Write, SeekFrom};
 use std::path::Path;
 use std::fs::File;
@@ -176,19 +177,39 @@ struct CPUHeaderData {
     size: u32
 }
 
-// TODO: turn all these unwraps and assertions and such into "return Err" states
+macro_rules! unwrap_or_return_err {
+    ($val:expr, $err_msg:literal) => {
+        match $val {
+            Ok(x) => x,
+            Err(err) => return Err(format!($err_msg, err))
+        }
+    };
+}
+
+macro_rules! unwrap_file_seek {
+    ($val:expr) => {
+        unwrap_or_return_err!($val, "Unable to seek file: {}")
+    }
+}
+
 fn load_elf(elf_path: &Path, output_file: &mut File) -> Result<CPUHeaderData, String> {
     // going to assume the start of the data should be 32-bit aligned
-    file_align_32(output_file);
-    let hdr_offset = output_file.stream_position().unwrap();
+    file_align_32(output_file)?;
+    let hdr_offset = unwrap_or_return_err!(output_file.stream_position(), "Unable to access executable: {}");
 
-    let in_file = std::fs::read(elf_path).expect("Unable to open executable");
-    let elf_data = elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(in_file.as_slice()).expect("no parsey");
-    let elf_segments = elf_data.segments().unwrap();
+    let in_file = unwrap_or_return_err!(std::fs::read(elf_path), "Unable to open executable: {}");
+    let elf_data = unwrap_or_return_err!(elf::ElfBytes::<elf::endian::AnyEndian>::minimal_parse(in_file.as_slice()),
+        "Unable to parse executable as ELF: {}");
+    let elf_segments = match elf_data.segments() {
+        Some(x) => x,
+        None => return Err("Executable file contained no ELF segments".to_string())
+    };
 
-    assert_eq!(elf_data.ehdr.e_machine, elf::abi::EM_ARM);
+    if elf_data.ehdr.e_machine != elf::abi::EM_ARM {
+        return Err("ELF file wasn't compiled for ARM".to_string());
+    }
 
-    let first_segment_addr =  elf_segments.get(0).unwrap().p_paddr;
+    let first_segment_addr =  unwrap_or_return_err!(elf_segments.get(0), "Executable file contained no ELF segments: {}").p_paddr;
     let mut last_segment_end = first_segment_addr;
 
     for s in elf_segments {
@@ -206,27 +227,30 @@ fn load_elf(elf_path: &Path, output_file: &mut File) -> Result<CPUHeaderData, St
                 return Err(format!("ERROR: segment ending at p addr {:#010x} \
                     overlaps with segment starting at {:#010x}",last_segment_end, s.p_paddr));
             }
-            output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)).unwrap();
+            unwrap_file_seek!(output_file.seek(SeekFrom::Current((s.p_paddr - last_segment_end) as i64)));
         }
         last_segment_end = s.p_paddr + s.p_filesz;
-        output_file.write_all(elf_data.segment_data(&s).unwrap()).unwrap();
+        let segment_data = unwrap_or_return_err!(elf_data.segment_data(&s), "Unable to parse ELF segment: {}");
+        unwrap_or_return_err!(output_file.write_all(segment_data), "Unable to write output file: {}");
     }
+    let size: u64 = unwrap_file_seek!(output_file.stream_position()) - hdr_offset;
     Ok(CPUHeaderData {
         rom_offset: hdr_offset as u32,
         entry_addr: elf_data.ehdr.e_entry as u32,
         ram_addr: first_segment_addr as u32,
-        size: (output_file.stream_position().unwrap() - hdr_offset) as u32
+        size: size as u32
     })
 }
 
 // Seek a file forward so that it is 32-bit aligned, filling in with 0s where necessary.
-fn file_align_32(file: &mut File) {
-    let cur_pos = file.stream_position().unwrap();
+fn file_align_32(file: &mut File) -> Result<(), String> {
+    let cur_pos = unwrap_file_seek!(file.stream_position());
 
     // check if it's already aligned
-    if cur_pos & 0b11 == 0 { return; }
-
-    file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)).unwrap();
+    if cur_pos & 0b11 != 0 {
+        unwrap_file_seek!(file.seek(SeekFrom::Current((0b11 - (cur_pos as i64 & 0b11)) + 1)));
+    }
+    Ok(())
 }
 
 // Calculate the CRC-16 of a block of data, using the same algorithm as the DS BIOS.
@@ -240,6 +264,7 @@ fn calc_crc_16(data: &[u8]) -> u16 {
     crc
 }
 
+// TODO: turn all these unwraps and assertions and such into "return Err" states
 pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Result<(), String> {
     let mut output_file = match File::options().create(true).read(true).write(true).open(output_path) {
         Err(why) => return Err(format!("Unable to create file: {} - {}", output_path.display(), why)),
@@ -275,7 +300,7 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
 
     // Get header checksum
     header.header_checksum = calc_crc_16(unsafe {
-        std::slice::from_raw_parts(&header as *const Header as *const u8, 0x15E)
+        std::slice::from_raw_parts(std::ptr::addr_of!(header).cast::<u8>(), 0x15E)
     });
 
     // Get total ROM size
@@ -284,7 +309,7 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
 
     output_file.rewind().unwrap(); // Seek to beginning
     output_file.write_all(unsafe {
-        std::slice::from_raw_parts(&header as *const Header as *const u8, std::mem::size_of::<Header>())
+        std::slice::from_raw_parts(std::ptr::addr_of!(header).cast::<u8>(), std::mem::size_of::<Header>())
     }).unwrap();
     Ok(())
 }
@@ -298,7 +323,7 @@ mod tests {
     fn file_align_32_already_aligned() {
         let mut tmpfile = tempfile::tempfile().unwrap();
         tmpfile.seek(SeekFrom::Start(4)).unwrap();
-        file_align_32(&mut tmpfile);
+        file_align_32(&mut tmpfile).unwrap();
         assert_eq!(tmpfile.stream_position().unwrap(), 4);
     }
 
@@ -307,7 +332,7 @@ mod tests {
         let mut tmpfile = tempfile::tempfile().unwrap();
         for i in 1..4 {
             tmpfile.seek(SeekFrom::Start(i)).unwrap();
-            file_align_32(&mut tmpfile);
+            file_align_32(&mut tmpfile).unwrap();
             assert_eq!(tmpfile.stream_position().unwrap(), 4);
         }
     }

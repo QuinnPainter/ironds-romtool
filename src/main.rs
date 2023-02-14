@@ -30,6 +30,8 @@ fn main() -> Result<(), String> {
         Ok(m) => { m }
         Err(f) => { return Err(f.to_string()); }
     };
+    // Since these args are "reqopt", if they didn't exist, it would have failed up above.
+    // So it should be safe to unwrap them.
     let args = Args {
         output_file_name: matches.opt_str("o").unwrap(),
         arm9_file_name: matches.opt_str("9").unwrap(),
