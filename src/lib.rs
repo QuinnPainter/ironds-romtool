@@ -269,7 +269,6 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
         "Unable to create output file: {}");
 
     let mut header = Header::default();
-    header.header_checksum = 0;
 
     // ARM9 binary starts at 0x4000
     unwrap_file_access!(output_file.seek(SeekFrom::Start(0x4000)));
@@ -295,14 +294,14 @@ pub fn build_rom(output_path: &Path, arm9_path: &Path, arm7_path: &Path) -> Resu
     unwrap_file_access!(output_file.read_exact(&mut secure_buf));
     header.secure_area_checksum = calc_crc_16(&secure_buf);
 
+    // Get total ROM size
+    unwrap_file_access!(output_file.seek(SeekFrom::End(0)));
+    header.total_rom_size = unwrap_file_access!(output_file.stream_position()) as u32;
+
     // Get header checksum
     header.header_checksum = calc_crc_16(unsafe {
         std::slice::from_raw_parts(std::ptr::addr_of!(header).cast::<u8>(), 0x15E)
     });
-
-    // Get total ROM size
-    unwrap_file_access!(output_file.seek(SeekFrom::End(0)));
-    header.total_rom_size = unwrap_file_access!(output_file.stream_position()) as u32;
 
     unwrap_file_access!(output_file.rewind()); // Seek to beginning
     unwrap_or_return_err!(output_file.write_all(unsafe {
